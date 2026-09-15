@@ -297,6 +297,32 @@
   .tabbar button .ico{ font-size:17px; line-height:1; }
   .tabbar button.active{ color:#fff; border-top-color:var(--red); }
 
+  /* ---------- Custom confirm dialog & toast (don't rely on native browser dialogs — those get silently blocked inside sandboxed previews / some embedded webviews) ---------- */
+  .confirm-overlay{
+    position:fixed; inset:0; background:rgba(12,19,48,.55); z-index:100;
+    display:flex; align-items:center; justify-content:center; padding:24px;
+  }
+  .confirm-box{
+    background:#fff; border-radius:14px; padding:20px; max-width:340px; width:100%;
+    box-shadow:0 14px 44px rgba(0,0,0,.35);
+  }
+  .confirm-box p{ margin:0 0 18px 0; font-size:14.5px; color:var(--ink); line-height:1.45; }
+  .confirm-box .row-btns{ margin-top:0; flex-wrap:nowrap; }
+  .confirm-box .row-btns button{ flex:1; }
+  .btn-confirm-danger{ background:var(--red); color:#fff; font-weight:700; padding:11px 16px; border-radius:9px; font-size:14px; }
+
+  .toast-stack{
+    position:fixed; left:0; right:0; bottom:calc(70px + env(safe-area-inset-bottom,0)); z-index:110;
+    display:flex; flex-direction:column; align-items:center; gap:8px; padding:0 16px; pointer-events:none;
+  }
+  .toast{
+    background:var(--navy-deep); color:#fff; font-size:13.5px; font-weight:600;
+    padding:11px 16px; border-radius:10px; box-shadow:0 6px 20px rgba(0,0,0,.3);
+    max-width:420px; text-align:center; pointer-events:auto;
+    animation: toast-in .18s ease-out;
+  }
+  @keyframes toast-in{ from{ opacity:0; transform:translateY(8px); } to{ opacity:1; transform:translateY(0); } }
+
   ::placeholder{ color:#A9AFC0; }
 </style>
 </head>
@@ -537,6 +563,8 @@
     <button data-tab="tab-export"><span class="ico">⬇️</span>Export</button>
   </nav>
 
+  <div class="toast-stack" id="toastStack"></div>
+
 </div>
 
 <script>
@@ -667,7 +695,7 @@
   }
 
   function pushAllToSheet(){
-    if (!state.syncUrl){ alert("Add your Google Sheet sync URL first."); return; }
+    if (!state.syncUrl){ showToast("Add your Google Sheet sync URL first."); return; }
     var btn = document.getElementById("btnSyncPushAll");
     if (btn){ btn.disabled = true; btn.textContent = "Pushing\u2026"; }
     fetch(state.syncUrl, {
@@ -681,32 +709,33 @@
         state.syncQueue = [];
         persist();
         renderSyncStatus();
-        alert("Everything's pushed to the Sheet.");
+        showToast("Everything's pushed to the Sheet.");
       } else {
-        alert("Push failed: " + (res && res.error ? res.error : "unknown error"));
+        showToast("Push failed: " + (res && res.error ? res.error : "unknown error"));
       }
     }).catch(function(err){
       if (btn){ btn.disabled = false; btn.textContent = "Push everything now"; }
-      alert("Push failed: " + err);
+      showToast("Push failed: " + err);
     });
   }
 
   function pullFromSheet(){
-    if (!state.syncUrl){ alert("Add your Google Sheet sync URL first."); return; }
-    if (!confirm("Replace everything on this phone with what's currently in the Sheet? Any not-yet-synced local changes here will be lost.")) return;
-    fetch(state.syncUrl).then(function(r){ return r.json(); }).then(function(data){
-      if (!data || !data.roster){ alert("Couldn't read data from the Sheet."); return; }
-      state.roster = data.roster.map(function(p){
-        return { id:p.id, number:p.number||"", name:p.name||"", goalie:!!p.goalie, active: p.active!==false };
-      });
-      state.games = data.games || {};
-      if (state.currentGameId && !state.games[state.currentGameId]) state.currentGameId = null;
-      state.syncQueue = [];
-      state.lastSyncedAt = new Date().toISOString();
-      persist();
-      render();
-      alert("Pulled the latest from the Sheet.");
-    }).catch(function(err){ alert("Pull failed: " + err); });
+    if (!state.syncUrl){ showToast("Add your Google Sheet sync URL first."); return; }
+    showConfirm("Replace everything on this phone with what's currently in the Sheet? Any not-yet-synced local changes here will be lost.", { confirmLabel:"Pull & replace", danger:true }, function(){
+      fetch(state.syncUrl).then(function(r){ return r.json(); }).then(function(data){
+        if (!data || !data.roster){ showToast("Couldn't read data from the Sheet."); return; }
+        state.roster = data.roster.map(function(p){
+          return { id:p.id, number:p.number||"", name:p.name||"", goalie:!!p.goalie, active: p.active!==false };
+        });
+        state.games = data.games || {};
+        if (state.currentGameId && !state.games[state.currentGameId]) state.currentGameId = null;
+        state.syncQueue = [];
+        state.lastSyncedAt = new Date().toISOString();
+        persist();
+        render();
+        showToast("Pulled the latest from the Sheet.");
+      }).catch(function(err){ showToast("Pull failed: " + err); });
+    });
   }
 
   window.addEventListener("online", function(){ flushSyncQueue(); });
@@ -881,9 +910,10 @@
           var id = btn.getAttribute("data-delgame");
           var g = state.games[id];
           var label = (g ? (g.meta.opponent||"TBD") : "this game");
-          if (!confirm("Delete the game vs " + label + " and all its logged goals? This can't be undone.")) return;
-          deleteGame(id);
-          openGamePicker(); // refresh the list in place
+          showConfirm("Delete the game vs " + label + " and all its logged goals? This can't be undone.", { confirmLabel:"Delete game", danger:true }, function(){
+            deleteGame(id);
+            openGamePicker(); // refresh the list in place
+          });
         });
       });
     } else {
@@ -1095,16 +1125,17 @@
     host.innerHTML = rows;
     host.querySelectorAll("[data-del]").forEach(function(btn){
       btn.addEventListener("click", function(){
-        if (!confirm("Delete this goal from the log?")) return;
         var eid = btn.getAttribute("data-del");
-        g.events = g.events.filter(function(e){ return e.id !== eid; });
-        persist();
-        queueSync("deleteEvent", { gameId: state.currentGameId, eventId: eid });
-        renderScoreboard();
-        renderGameStrip();
-        renderEventLog();
-        renderGameStatsTable();
-        renderStatsTab();
+        showConfirm("Delete this goal from the log?", { confirmLabel:"Delete", danger:true }, function(){
+          g.events = g.events.filter(function(e){ return e.id !== eid; });
+          persist();
+          queueSync("deleteEvent", { gameId: state.currentGameId, eventId: eid });
+          renderScoreboard();
+          renderGameStrip();
+          renderEventLog();
+          renderGameStatsTable();
+          renderStatsTab();
+        });
       });
     });
   }
@@ -1191,15 +1222,16 @@
       }
       return { number: number, name: name || "Player" };
     });
-    if (!confirm("Import "+parsed.length+" player(s)? This replaces your current roster (past game stats stay intact).")) return;
-    state.roster = parsed.map(function(pl){
-      return { id: uid("p"), number: pl.number, name: pl.name, goalie:false, active:true };
+    showConfirm("Import "+parsed.length+" player(s)? This replaces your current roster (past game stats stay intact).", { confirmLabel:"Import" }, function(){
+      state.roster = parsed.map(function(pl){
+        return { id: uid("p"), number: pl.number, name: pl.name, goalie:false, active:true };
+      });
+      persist();
+      queueSync("upsertRoster", { roster: state.roster });
+      renderRosterTab();
+      renderGameLive();
+      renderStatsTab();
     });
-    persist();
-    queueSync("upsertRoster", { roster: state.roster });
-    renderRosterTab();
-    renderGameLive();
-    renderStatsTab();
   }
 
   // ---------- Stats tab ----------
@@ -1289,7 +1321,7 @@
 
   function exportGameCsv(){
     var g = currentGame();
-    if (!g){ alert("Select a game first."); return; }
+    if (!g){ showToast("Select a game first."); return; }
     var rows = computeStats(g.events, statsRosterForCompute());
     rows.sort(function(a,b){ return (parseInt(a.number)||999) - (parseInt(b.number)||999); });
     var lines = ["Opponent,Date,Number,Name,Goals,Assists,Plus/Minus"];
@@ -1311,6 +1343,40 @@
     });
   }
   function escapeAttr(s){ return escapeHtml(s); }
+
+  // ---------- Custom confirm / toast ----------
+  // Deliberately not using window.confirm()/alert() — those get silently
+  // swallowed in sandboxed previews and some embedded webviews, which makes
+  // buttons that depend on them look like they do nothing.
+  function showConfirm(message, opts, onYes){
+    opts = opts || {};
+    var overlay = document.createElement("div");
+    overlay.className = "confirm-overlay";
+    overlay.innerHTML =
+      '<div class="confirm-box">' +
+        '<p>' + escapeHtml(message) + '</p>' +
+        '<div class="row-btns">' +
+          '<button class="btn-secondary" id="confirmCancelBtn" type="button">Cancel</button>' +
+          '<button class="'+(opts.danger ? "btn-confirm-danger" : "btn-primary")+'" id="confirmYesBtn" type="button">'+escapeHtml(opts.confirmLabel || "OK")+'</button>' +
+        '</div>' +
+      '</div>';
+    document.body.appendChild(overlay);
+    function close(){ if (overlay.parentNode) overlay.parentNode.removeChild(overlay); }
+    overlay.addEventListener("click", function(e){ if (e.target === overlay) close(); });
+    document.getElementById("confirmCancelBtn").addEventListener("click", close);
+    document.getElementById("confirmYesBtn").addEventListener("click", function(){ close(); onYes(); });
+  }
+
+  function showToast(message){
+    var stack = document.getElementById("toastStack");
+    if (!stack){ return; }
+    var el = document.createElement("div");
+    el.className = "toast";
+    el.textContent = message;
+    stack.appendChild(el);
+    el.addEventListener("click", function(){ if (el.parentNode) el.parentNode.removeChild(el); });
+    setTimeout(function(){ if (el.parentNode) el.parentNode.removeChild(el); }, 4000);
+  }
 
   // ---------- wiring ----------
   function switchTab(tabId){
@@ -1358,7 +1424,7 @@
     document.getElementById("btnStartGame").addEventListener("click", function(){
       var opponent = document.getElementById("npOpponent").value.trim();
       var date = document.getElementById("npDate").value;
-      if (!opponent){ alert("Enter an opponent name."); return; }
+      if (!opponent){ showToast("Enter an opponent name."); return; }
       var taggedGoalies = activeRoster().filter(function(p){ return p.goalie; });
       var defaultGoalieId = taggedGoalies.length === 1 ? taggedGoalies[0].id : null;
       var meta = { opponent: opponent, date: date, homeAway: pickerHomeAway, goalieId: defaultGoalieId };
@@ -1428,27 +1494,31 @@
       if (!file) return;
       var reader = new FileReader();
       reader.onload = function(){
+        var parsed;
         try{
-          var parsed = JSON.parse(reader.result);
+          parsed = JSON.parse(reader.result);
           if (!parsed.roster || !parsed.games) throw new Error("bad file");
-          if (!confirm("Restore this backup? It will replace everything currently on this phone.")) return;
+        }catch(err){
+          showToast("Couldn't read that file — is it a Wolves Stats backup .json?");
+          return;
+        }
+        showConfirm("Restore this backup? It will replace everything currently on this phone.", { confirmLabel:"Restore", danger:true }, function(){
           state = parsed;
           persist();
           render();
-          alert("Backup restored.");
-        }catch(err){
-          alert("Couldn't read that file — is it a Wolves Stats backup .json?");
-        }
+          showToast("Backup restored.");
+        });
       };
       reader.readAsText(file);
       e.target.value = "";
     });
     document.getElementById("btnResetAll").addEventListener("click", function(){
-      if (!confirm("Clear the roster and every game on this phone? This can't be undone.")) return;
-      state = defaultState();
-      persist();
-      resetPendingEntry();
-      render();
+      showConfirm("Clear the roster and every game on this phone? This can't be undone.", { confirmLabel:"Clear everything", danger:true }, function(){
+        state = defaultState();
+        persist();
+        resetPendingEntry();
+        render();
+      });
     });
 
     render();
