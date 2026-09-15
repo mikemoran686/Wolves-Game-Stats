@@ -511,7 +511,12 @@
           <button class="btn-secondary" id="btnSyncPushAll">Push everything now</button>
           <button class="btn-secondary" id="btnSyncPull">Pull from Sheet</button>
         </div>
-        <p class="hint" style="margin-top:10px; margin-bottom:0;">"Push everything now" backfills the whole season into a freshly connected Sheet. "Pull from Sheet" replaces what's on this phone with what's currently in the Sheet — handy if a different coach's phone is tracking tonight.</p>
+        <p class="hint" style="margin-top:10px;">"Push everything now" backfills the whole season into a freshly connected Sheet. "Pull from Sheet" replaces what's on this phone with what's currently in the Sheet — handy if a different coach's phone is tracking tonight.</p>
+        <div class="divider-sm"></div>
+        <div class="row-btns">
+          <button class="btn-secondary" id="btnCopySyncLink">Copy setup link for other coaches</button>
+        </div>
+        <p class="hint" style="margin-top:10px; margin-bottom:0;">This link has your Sheet connection built in — anyone who opens it gets synced automatically, no copy-pasting the Apps Script URL themselves.</p>
       </div>
 
       <h2 class="section-title">Manual export</h2>
@@ -719,23 +724,62 @@
     });
   }
 
+  function doPullFromSheet_(){
+    return fetch(state.syncUrl).then(function(r){ return r.json(); }).then(function(data){
+      if (!data || !data.roster){ showToast("Couldn't read data from the Sheet."); return false; }
+      state.roster = data.roster.map(function(p){
+        return { id:p.id, number:p.number||"", name:p.name||"", goalie:!!p.goalie, active: p.active!==false };
+      });
+      state.games = data.games || {};
+      if (state.currentGameId && !state.games[state.currentGameId]) state.currentGameId = null;
+      state.syncQueue = [];
+      state.lastSyncedAt = new Date().toISOString();
+      persist();
+      render();
+      return true;
+    }).catch(function(err){ showToast("Pull failed: " + err); return false; });
+  }
+
+  function isFreshLocalState_(){
+    if (Object.keys(state.games).length) return false;
+    return state.roster.every(function(p){ return !p.number && /^Player \d+$/.test(p.name); });
+  }
+
   function pullFromSheet(){
     if (!state.syncUrl){ showToast("Add your Google Sheet sync URL first."); return; }
     showConfirm("Replace everything on this phone with what's currently in the Sheet? Any not-yet-synced local changes here will be lost.", { confirmLabel:"Pull & replace", danger:true }, function(){
-      fetch(state.syncUrl).then(function(r){ return r.json(); }).then(function(data){
-        if (!data || !data.roster){ showToast("Couldn't read data from the Sheet."); return; }
-        state.roster = data.roster.map(function(p){
-          return { id:p.id, number:p.number||"", name:p.name||"", goalie:!!p.goalie, active: p.active!==false };
-        });
-        state.games = data.games || {};
-        if (state.currentGameId && !state.games[state.currentGameId]) state.currentGameId = null;
-        state.syncQueue = [];
-        state.lastSyncedAt = new Date().toISOString();
-        persist();
-        render();
-        showToast("Pulled the latest from the Sheet.");
-      }).catch(function(err){ showToast("Pull failed: " + err); });
+      doPullFromSheet_().then(function(ok){ if (ok) showToast("Pulled the latest from the Sheet."); });
     });
+  }
+
+  function copySyncLink(){
+    if (!state.syncUrl){ showToast("Save your Sheet connection first, then this link will include it."); return; }
+    var base = window.location.origin + window.location.pathname;
+    var link = base + "?sync=" + encodeURIComponent(state.syncUrl);
+    copyToClipboard_(link, function(ok){
+      showToast(ok ? "Setup link copied \u2014 text or email it to your other coaches." : "Couldn't copy automatically \u2014 link: " + link);
+    });
+  }
+
+  function copyToClipboard_(text, done){
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(function(){ done(true); }).catch(function(){ fallbackCopy_(text, done); });
+    } else {
+      fallbackCopy_(text, done);
+    }
+  }
+  function fallbackCopy_(text, done){
+    try{
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      document.body.appendChild(ta);
+      ta.focus(); ta.select();
+      var ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      done(!!ok);
+    }catch(e){ done(false); }
   }
 
   window.addEventListener("online", function(){ flushSyncQueue(); });
@@ -1388,8 +1432,28 @@
   }
 
   document.addEventListener("DOMContentLoaded", function(){
+    // If this page was opened via a setup link (?sync=...), pick up the sync
+    // URL automatically so other coaches don't have to paste it in by hand.
+    try {
+      var queryParams = new URLSearchParams(window.location.search);
+      var syncFromLink = queryParams.get("sync");
+      if (syncFromLink){
+        state.syncUrl = syncFromLink;
+        persist();
+        if (window.history && window.history.replaceState){
+          var cleanUrl = new URL(window.location.href);
+          cleanUrl.searchParams.delete("sync");
+          window.history.replaceState({}, "", cleanUrl.toString());
+        }
+        if (isFreshLocalState_()){
+          doPullFromSheet_().then(function(ok){ if (ok) showToast("Connected \u2014 loaded the current roster and games."); });
+        }
+      }
+    } catch (e) { /* malformed URL params — just skip auto-connect */ }
+
     populateOpponentDatalist();
     document.getElementById("syncUrlInput").value = state.syncUrl || "";
+    if (state.syncUrl) flushSyncQueue();
 
     document.querySelectorAll(".tabbar button").forEach(function(btn){
       btn.addEventListener("click", function(){ switchTab(btn.getAttribute("data-tab")); });
@@ -1404,6 +1468,7 @@
     });
     document.getElementById("btnSyncPushAll").addEventListener("click", pushAllToSheet);
     document.getElementById("btnSyncPull").addEventListener("click", pullFromSheet);
+    document.getElementById("btnCopySyncLink").addEventListener("click", copySyncLink);
 
     document.getElementById("btnOpenGamePicker").addEventListener("click", openGamePicker);
     document.getElementById("btnGameStripPicker").addEventListener("click", openGamePicker);
