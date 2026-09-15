@@ -267,9 +267,11 @@
   .btn-danger{ background:#fff; color:var(--red); border:1px solid #F0C2C4; font-weight:700; padding:11px 16px; border-radius:9px; font-size:14px; }
   .row-btns{ display:flex; gap:10px; margin-top:12px; flex-wrap:wrap; }
   .switch-list{ max-height:170px; overflow-y:auto; border:1px solid var(--line); border-radius:8px; margin-top:8px; }
-  .switch-item{ padding:10px 12px; border-bottom:1px solid var(--line); font-size:13px; display:flex; justify-content:space-between; }
+  .switch-item{ padding:10px 12px; border-bottom:1px solid var(--line); font-size:13px; display:flex; justify-content:space-between; align-items:center; }
   .switch-item:last-child{ border-bottom:none; }
   .switch-item button{ background:none; color:var(--navy); font-weight:700; font-size:12.5px; }
+  .switch-item-btns{ display:flex; align-items:center; gap:10px; flex-shrink:0; }
+  .switch-item .del-game{ color:var(--red); font-size:15px; font-weight:800; padding:2px 4px; }
 
   /* ---------- Export tab ---------- */
   .export-item{
@@ -863,7 +865,8 @@
       list.innerHTML = ids.map(function(id){
         var g = state.games[id];
         var n = (g.events||[]).length;
-        return '<div class="switch-item"><span>' + escapeHtml(g.meta.opponent||"TBD") + (g.meta.date ? " \u2014 " + fmtDate(g.meta.date) : "") + ' (' + n + ')</span><button data-resume="'+id+'">Resume</button></div>';
+        return '<div class="switch-item"><span>' + escapeHtml(g.meta.opponent||"TBD") + (g.meta.date ? " \u2014 " + fmtDate(g.meta.date) : "") + ' (' + n + ')</span>' +
+          '<span class="switch-item-btns"><button data-resume="'+id+'">Resume</button><button class="del-game" data-delgame="'+id+'" title="Delete game">\u2715</button></span></div>';
       }).join("");
       list.querySelectorAll("[data-resume]").forEach(function(btn){
         btn.addEventListener("click", function(){
@@ -873,12 +876,30 @@
           render();
         });
       });
+      list.querySelectorAll("[data-delgame]").forEach(function(btn){
+        btn.addEventListener("click", function(){
+          var id = btn.getAttribute("data-delgame");
+          var g = state.games[id];
+          var label = (g ? (g.meta.opponent||"TBD") : "this game");
+          if (!confirm("Delete the game vs " + label + " and all its logged goals? This can't be undone.")) return;
+          deleteGame(id);
+          openGamePicker(); // refresh the list in place
+        });
+      });
     } else {
       wrap.style.display = "none";
     }
   }
   function closeGamePicker(){
     document.getElementById("gamePickerCard").style.display = "none";
+  }
+
+  function deleteGame(gameId){
+    delete state.games[gameId];
+    if (state.currentGameId === gameId) state.currentGameId = null;
+    persist();
+    queueSync("deleteGame", { gameId: gameId });
+    render();
   }
 
   function renderGameLive(){
