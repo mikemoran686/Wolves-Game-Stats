@@ -123,6 +123,8 @@
     background:var(--ice); color:var(--navy); font-weight:700; font-size:12.5px;
     padding:8px 12px; border-radius:8px; border:1px solid var(--line);
   }
+  .strip-btns{ display:flex; gap:8px; flex-shrink:0; }
+  .btn-small.btn-end{ color:var(--red); border-color:#F0C2C4; background:#fff; }
   #goalieStrip select{
     background:var(--ice); color:var(--navy); font-weight:700; font-size:12.5px;
     padding:8px 10px; border-radius:8px; border:1px solid var(--line); max-width:60%;
@@ -364,7 +366,10 @@
         <div class="info">
           <span id="gsLine">Set up a game to start logging goals.</span>
         </div>
-        <button class="btn-small" id="btnGameStripPicker">Games</button>
+        <span class="strip-btns">
+          <button class="btn-small btn-end" id="btnEndGame" style="display:none;">End game</button>
+          <button class="btn-small" id="btnGameStripPicker">Games</button>
+        </span>
       </div>
 
       <div class="game-strip" id="goalieStrip" style="display:none;">
@@ -894,6 +899,7 @@
   function renderGameStrip(){
     var g = currentGame();
     var gs = document.getElementById("gsLine");
+    document.getElementById("btnEndGame").style.display = g ? "inline-block" : "none";
     if (!g){
       gs.textContent = "No game selected yet.";
     } else {
@@ -1469,6 +1475,20 @@
     document.getElementById("btnSyncPushAll").addEventListener("click", pushAllToSheet);
     document.getElementById("btnSyncPull").addEventListener("click", pullFromSheet);
     document.getElementById("btnCopySyncLink").addEventListener("click", copySyncLink);
+
+    document.getElementById("btnEndGame").addEventListener("click", function(){
+      var g = currentGame();
+      if (!g) return;
+      var us = 0, them = 0;
+      (g.events||[]).forEach(function(ev){ if (ev.type==="for") us++; else them++; });
+      showConfirm("End the game vs " + (g.meta.opponent || "this opponent") + " (final: Wolves " + us + ", " + them + ")? It stays saved and in your season stats — you can reopen it any time from Games.", { confirmLabel:"End game" }, function(){
+        state.currentGameId = null;
+        persist();
+        resetPendingEntry();
+        render();
+        showToast("Game ended and saved.");
+      });
+    });
 
     document.getElementById("btnOpenGamePicker").addEventListener("click", openGamePicker);
     document.getElementById("btnGameStripPicker").addEventListener("click", openGamePicker);
