@@ -850,7 +850,10 @@
     gamesList.forEach(function(g){
       if (g.meta.goalieId) ensure(g.meta.goalieId).gamesInNet += 1;
       (g.events||[]).forEach(function(ev){
-        if (ev.type==="against" && ev.goalieId) ensure(ev.goalieId).ga += 1;
+        // Goals logged before a goalie was picked have no goalie of their own,
+        // so they count for the game's goalie.
+        var who = ev.goalieId || g.meta.goalieId;
+        if (ev.type==="against" && who) ensure(who).ga += 1;
       });
     });
     return Object.keys(map).map(function(k){ return map[k]; }).sort(function(a,b){ return b.gamesInNet - a.gamesInNet; });
@@ -930,8 +933,17 @@
 
   var pickerHomeAway = "home";
 
+  function todayIso_(){
+    var d = new Date();
+    var m = String(d.getMonth()+1), day = String(d.getDate());
+    return d.getFullYear() + "-" + (m.length<2?"0":"") + m + "-" + (day.length<2?"0":"") + day;
+  }
+
   function openGamePicker(){
     document.getElementById("gamePickerCard").style.display = "block";
+    // Start with today's date filled in so a game can't be created without one.
+    var dateEl = document.getElementById("npDate");
+    if (!dateEl.value) dateEl.value = todayIso_();
     var ids = Object.keys(state.games);
     var wrap = document.getElementById("pastGamesWrap");
     var list = document.getElementById("pastGamesList");
