@@ -379,6 +379,15 @@
         <select id="goalieSelect"></select>
       </div>
 
+      <div class="game-strip" id="absentStrip" style="display:none;">
+        <div class="info"><span id="absentLine">Everyone here</span></div>
+        <button class="btn-small" id="btnAttendance" type="button">Attendance</button>
+      </div>
+      <div id="attendanceCard" class="card" style="display:none; margin-bottom:16px;">
+        <p class="panel-sub" style="margin-bottom:8px;">Tap anyone who is <b>missing</b> from this game. Everyone else counts as having played.</p>
+        <div class="chip-grid" id="attendanceGrid"></div>
+      </div>
+
       <div id="gamePickerCard" class="card" style="display:none; margin-bottom:16px;">
         <h2 class="section-title" style="margin-top:0;">Start or resume a game</h2>
         <div class="field-row">
@@ -437,7 +446,7 @@
         <p class="hint" id="gameGoalieLine" style="margin-top:-6px;"></p>
         <div class="card">
           <table class="stats">
-            <thead><tr><th style="text-align:left;">Player</th><th>G</th><th>A</th><th>+/-</th></tr></thead>
+            <thead><tr><th style="text-align:left;">Player</th><th>G</th><th>A</th><th>Pts</th><th>+/-</th></tr></thead>
             <tbody id="gameStatsBody"></tbody>
           </table>
         </div>
@@ -478,15 +487,17 @@
           <thead>
             <tr>
               <th style="text-align:left;">Player</th>
+              <th class="sortable" data-sort="gp">GP</th>
               <th class="sortable" data-sort="g">G</th>
               <th class="sortable" data-sort="a">A</th>
+              <th class="sortable" data-sort="pts">Pts</th>
               <th class="sortable" data-sort="pm">+/-</th>
             </tr>
           </thead>
           <tbody id="statsTabBody"></tbody>
         </table>
       </div>
-      <p class="hint">+/- counts a player once for every goal scored while they were on the ice, for or against — same idea as the NHL stat, just tracked by hand from the bench. The goalie in net isn't part of that count.</p>
+      <p class="hint">GP = games played (every game the player wasn\u2019t marked absent). Pts = goals + assists. +/- counts a player once for every goal scored while they were on the ice, for or against — same idea as the NHL stat, just tracked by hand from the bench. The goalie in net isn't part of that count.</p>
 
       <div class="card" id="goalieStatsCard" style="margin-top:14px; display:none;">
         <h2 class="section-title" style="margin-top:0;">Goalies</h2>
@@ -735,7 +746,13 @@
       state.roster = data.roster.map(function(p){
         return { id:p.id, number:p.number||"", name:p.name||"", goalie:!!p.goalie, active: p.active!==false };
       });
+      var oldGames = state.games || {};
       state.games = data.games || {};
+      Object.keys(state.games).forEach(function(gid){
+        var m = state.games[gid].meta = state.games[gid].meta || {};
+        // Older Sheet scripts don't store absences; keep what this phone has until the Sheet does.
+        if (m.absent === undefined) m.absent = (oldGames[gid] && oldGames[gid].meta && oldGames[gid].meta.absent) || [];
+      });
       if (state.currentGameId && !state.games[state.currentGameId]) state.currentGameId = null;
       state.syncQueue = [];
       state.lastSyncedAt = new Date().toISOString();
@@ -807,7 +824,7 @@
   function computeStats(events, rosterList){
     var map = {};
     rosterList.forEach(function(p){
-      map[p.id] = { id:p.id, number:p.number, name:p.name, goalie:p.goalie, g:0, a:0, pm:0 };
+      map[p.id] = { id:p.id, number:p.number, name:p.name, goalie:p.goalie, g:0, a:0, pts:0, pm:0, gp:0 };
     });
     events.forEach(function(ev){
       (ev.onIce||[]).forEach(function(pid){
@@ -819,7 +836,41 @@
         if (ev.assist && ev.assist!==NONE && ev.assist!==UNCLEAR && map[ev.assist]) map[ev.assist].a += 1;
       }
     });
-    return Object.keys(map).map(function(k){ return map[k]; });
+    return Object.keys(map).map(function(k){ map[k].pts = map[k].g + map[k].a; return map[k]; });
+  }
+
+  // Games played: every game a player was not marked absent. Active roster
+  // players count for every game; a player removed from the roster only counts
+  // for games where they actually appear in a logged goal.
+  function computeGP(gamesList){
+    var gp = {};
+    gamesList.forEach(function(g){
+      var absent = (g.meta && g.meta.absent) || [];
+      var inEvents = {};
+      (g.events||[]).forEach(function(ev){
+        (ev.onIce||[]).forEach(function(pid){ inEvents[pid] = true; });
+        if (ev.scorer) inEvents[ev.scorer] = true;
+        if (ev.assist) inEvents[ev.assist] = true;
+      });
+      state.roster.forEach(function(p){
+        if (absent.indexOf(p.id) > -1) return;
+        if (p.active || inEvents[p.id]) gp[p.id] = (gp[p.id]||0) + 1;
+      });
+    });
+    return gp;
+  }
+  function withGP(rows, gamesList){
+    var gp = computeGP(gamesList);
+    rows.forEach(function(r){ r.gp = gp[r.id] || 0; });
+    return rows;
+  }
+  function allGames(){
+    return Object.keys(state.games).map(function(id){ return state.games[id]; });
+  }
+  function absentIds(g){ return (g && g.meta && g.meta.absent) || []; }
+  function availableRoster(g){
+    var out = absentIds(g);
+    return activeRoster().filter(function(p){ return out.indexOf(p.id) === -1; });
   }
 
   function allEvents(){
@@ -864,6 +915,8 @@
   var pendingOnIce = [];       // array of player ids
   var pendingScorer = null;
   var pendingAssist = null;
+  var pendingSkipPM = false;   // true = don't know who was on the ice
+  var attendanceOpen = false;
   var statsView = "game";      // "game" | "season"
   var statsSortKey = null;
   var statsSortDir = -1;
@@ -910,6 +963,64 @@
       gs.innerHTML = "vs <b>" + escapeHtml(g.meta.opponent || "TBD") + "</b> \u00b7 " + n + " goal" + (n===1?"":"s") + " logged";
     }
     renderGoalieStrip();
+    renderAbsentStrip();
+  }
+
+  function renderAbsentStrip(){
+    var g = currentGame();
+    var strip = document.getElementById("absentStrip");
+    var card = document.getElementById("attendanceCard");
+    if (!g){ strip.style.display = "none"; card.style.display = "none"; return; }
+    strip.style.display = "flex";
+    var out = absentIds(g).map(rosterById).filter(Boolean);
+    var line = document.getElementById("absentLine");
+    if (out.length){
+      line.innerHTML = "\u274c Out: <b>" + out.map(function(p){ return escapeHtml((p.number?"#"+p.number+" ":"") + p.name); }).join(", ") + "</b>";
+    } else {
+      line.textContent = "\u2705 Everyone here";
+    }
+    card.style.display = attendanceOpen ? "block" : "none";
+    if (attendanceOpen) renderAttendanceGrid();
+  }
+
+  function renderAttendanceGrid(){
+    var g = currentGame();
+    var host = document.getElementById("attendanceGrid");
+    if (!g) return;
+    var out = absentIds(g);
+    host.innerHTML = activeRoster().map(function(p){
+      return playerChipHtml(p, out.indexOf(p.id) > -1 ? "sel-against" : "");
+    }).join("");
+    host.querySelectorAll(".chip").forEach(function(chip){
+      chip.addEventListener("click", function(){ toggleAbsent(chip.getAttribute("data-pid")); });
+    });
+  }
+
+  function toggleAbsent(pid){
+    var g = currentGame();
+    if (!g) return;
+    var list = absentIds(g).slice();
+    var i = list.indexOf(pid);
+    if (i > -1){ list.splice(i,1); }
+    else {
+      list.push(pid);
+      if (g.meta.goalieId === pid){
+        g.meta.goalieId = null;
+        showToast("That player was set as goalie \u2014 goalie cleared for this game.");
+      }
+      var oi = pendingOnIce.indexOf(pid);
+      if (oi > -1) pendingOnIce.splice(oi,1);
+      if (pendingScorer === pid) pendingScorer = null;
+      if (pendingAssist === pid) pendingAssist = null;
+    }
+    g.meta.absent = list;
+    persist();
+    queueSync("upsertGame", { gameId: state.currentGameId, meta: g.meta });
+    renderAbsentStrip();
+    renderGoalieStrip();
+    renderEntryPanel();
+    renderGameStatsTable();
+    renderStatsTab();
   }
 
   function renderGoalieStrip(){
@@ -918,7 +1029,7 @@
     var sel = document.getElementById("goalieSelect");
     if (!g){ strip.style.display = "none"; return; }
     strip.style.display = "flex";
-    var roster = activeRoster();
+    var roster = availableRoster(g);
     var options = '<option value="">No goalie set</option>' + roster.map(function(p){
       return '<option value="'+p.id+'">' + (p.number?"#"+escapeHtml(p.number)+" ":"") + escapeHtml(p.name) + '</option>';
     }).join("");
@@ -1028,7 +1139,7 @@
     actionButtons.style.display = "none";
     var g = currentGame();
     var goalieId = g ? g.meta.goalieId : null;
-    var roster = activeRoster().filter(function(p){ return p.id !== goalieId; });
+    var roster = availableRoster(g).filter(function(p){ return p.id !== goalieId; });
     var title = pendingType==="for" ? "Wolves Goal" : "Goal Against";
 
     var onIceChips = roster.map(function(p){
@@ -1039,14 +1150,21 @@
     var html = '<div class="panel">';
     html += '<div class="panel-head '+pendingType+'"><span>'+title+'</span><button id="btnCancelEntry" type="button">Cancel</button></div>';
     html += '<div class="panel-body">';
-    html += '<p class="panel-sub">Who was on the ice? <span class="count">'+pendingOnIce.length+' selected</span></p>';
-    html += '<div class="chip-grid" id="onIceGrid">' + onIceChips + '</div>';
+    html += '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:var(--steel);margin:0 0 12px 0;"><input type="checkbox" id="chkSkipPM" '+(pendingSkipPM?"checked":"")+'> Don\u2019t know who was on ice (skip plus/minus)</label>';
+    if (!pendingSkipPM){
+      html += '<p class="panel-sub">Who was on the ice? <span class="count">'+pendingOnIce.length+' selected</span></p>';
+      html += '<div class="chip-grid" id="onIceGrid">' + onIceChips + '</div>';
+    }
     if (goalieId && rosterById(goalieId)){
       html += '<p class="panel-sub" style="margin-top:6px;">'+escapeHtml(playerLabel(goalieId))+' is in net for this game, so isn\u2019t listed here.</p>';
     }
+    var outPlayers = absentIds(g).map(rosterById).filter(Boolean);
+    if (outPlayers.length){
+      html += '<p class="panel-sub" style="margin-top:6px;">Marked absent: '+escapeHtml(outPlayers.map(function(p){ return p.name; }).join(", "))+'.</p>';
+    }
 
     if (pendingType==="for"){
-      var onIcePlayers = pendingOnIce.map(rosterById).filter(Boolean);
+      var onIcePlayers = pendingSkipPM ? roster : pendingOnIce.map(rosterById).filter(Boolean);
       if (onIcePlayers.length){
         html += '<div class="divider-sm"></div>';
         html += '<p class="panel-sub">Who scored?</p>';
@@ -1072,13 +1190,20 @@
       }
     }
 
-    var canLog = pendingOnIce.length > 0 && (pendingType==="against" || !!pendingScorer);
+    var canLog = (pendingSkipPM || pendingOnIce.length > 0) && (pendingType==="against" || !!pendingScorer);
     html += '<button class="log-btn '+pendingType+'" id="btnLogGoal" '+(canLog?"":"disabled")+'>Log goal</button>';
     html += '</div></div>';
     host.innerHTML = html;
 
+    var skipChk = document.getElementById("chkSkipPM");
+    if (skipChk) skipChk.addEventListener("change", function(){
+      pendingSkipPM = skipChk.checked;
+      pendingOnIce = [];
+      pendingScorer = null; pendingAssist = null;
+      renderEntryPanel();
+    });
     var onIceGrid = document.getElementById("onIceGrid");
-    onIceGrid.querySelectorAll(".chip").forEach(function(chip){
+    if (onIceGrid) onIceGrid.querySelectorAll(".chip").forEach(function(chip){
       chip.addEventListener("click", function(){
         var pid = chip.getAttribute("data-pid");
         var idx = pendingOnIce.indexOf(pid);
@@ -1119,7 +1244,7 @@
   }
 
   function resetPendingEntry(){
-    pendingType = null; pendingOnIce = []; pendingScorer = null; pendingAssist = null;
+    pendingType = null; pendingOnIce = []; pendingScorer = null; pendingAssist = null; pendingSkipPM = false;
     renderEntryPanel();
   }
 
@@ -1129,7 +1254,7 @@
     var ev = {
       id: uid("e"),
       type: pendingType,
-      onIce: pendingOnIce.slice(),
+      onIce: pendingSkipPM ? [] : pendingOnIce.slice(),
       scorer: pendingType==="for" ? pendingScorer : null,
       assist: pendingType==="for" ? (pendingAssist || NONE) : null,
       goalieId: g.meta.goalieId || null,
@@ -1157,11 +1282,11 @@
     if (ev.assist && ev.assist!==NONE){
       assistTxt = ev.assist===UNCLEAR ? " (assist unclear)" : " (assist " + playerLabel(ev.assist) + ")";
     }
-    var onIceTxt = (ev.onIce||[]).map(playerLabel).join(", ");
+    var onIceTxt = (ev.onIce||[]).length ? "On ice: " + (ev.onIce||[]).map(playerLabel).join(", ") : "On ice not recorded (no plus/minus)";
     if (ev.type==="for"){
-      return { main: "Wolves goal \u2014 " + scorer + assistTxt, sub: "On ice: " + onIceTxt };
+      return { main: "Wolves goal \u2014 " + scorer + assistTxt, sub: onIceTxt };
     }
-    return { main: "Goal against", sub: "On ice: " + onIceTxt };
+    return { main: "Goal against", sub: onIceTxt };
   }
   function playerLabel(pid){
     var p = rosterById(pid);
@@ -1214,8 +1339,8 @@
       .sort(function(a,b){ return (parseInt(a.number)||999) - (parseInt(b.number)||999); });
     body.innerHTML = rows.map(function(r){
       return '<tr><td class="name">'+(r.number?"#"+escapeHtml(r.number)+" ":"")+escapeHtml(r.name)+'</td>' +
-        '<td>'+r.g+'</td><td>'+r.a+'</td><td class="'+pmClass(r.pm)+'">'+fmtPm(r.pm)+'</td></tr>';
-    }).join("") || '<tr><td colspan="4" class="empty">No stats yet.</td></tr>';
+        '<td>'+r.g+'</td><td>'+r.a+'</td><td>'+r.pts+'</td><td class="'+pmClass(r.pm)+'">'+fmtPm(r.pm)+'</td></tr>';
+    }).join("") || '<tr><td colspan="5" class="empty">No stats yet.</td></tr>';
 
     var goalieLine = document.getElementById("gameGoalieLine");
     if (g.meta.goalieId && rosterById(g.meta.goalieId)){
@@ -1302,7 +1427,8 @@
     document.getElementById("statsToggleSeason").classList.toggle("on", statsView==="season");
     var body = document.getElementById("statsTabBody");
     var events = statsView==="game" ? ((currentGame()||{}).events||[]) : allEvents();
-    var rows = computeStats(events, statsRosterForCompute());
+    var gamesForView = statsView==="game" ? (currentGame() ? [currentGame()] : []) : allGames();
+    var rows = withGP(computeStats(events, statsRosterForCompute()), gamesForView);
     if (statsSortKey){
       rows.sort(function(a,b){ return (b[statsSortKey]-a[statsSortKey]) * statsSortDir; });
     } else {
@@ -1310,8 +1436,8 @@
     }
     body.innerHTML = rows.map(function(r){
       return '<tr><td class="name">'+(r.number?"#"+escapeHtml(r.number)+" ":"")+escapeHtml(r.name)+'</td>' +
-        '<td>'+r.g+'</td><td>'+r.a+'</td><td class="'+pmClass(r.pm)+'">'+fmtPm(r.pm)+'</td></tr>';
-    }).join("") || '<tr><td colspan="4" class="empty">No stats yet.</td></tr>';
+        '<td>'+r.gp+'</td><td>'+r.g+'</td><td>'+r.a+'</td><td><b>'+r.pts+'</b></td><td class="'+pmClass(r.pm)+'">'+fmtPm(r.pm)+'</td></tr>';
+    }).join("") || '<tr><td colspan="6" class="empty">No stats yet.</td></tr>';
 
     var gamesList = statsView==="game" ? (currentGame() ? [currentGame()] : []) : Object.keys(state.games).map(function(id){ return state.games[id]; });
     var goalieRows = computeGoalieStats(gamesList);
@@ -1343,11 +1469,11 @@
   }
 
   function exportSeasonCsv(){
-    var rows = computeStats(allEvents(), statsRosterForCompute());
+    var rows = withGP(computeStats(allEvents(), statsRosterForCompute()), allGames());
     rows.sort(function(a,b){ return (parseInt(a.number)||999) - (parseInt(b.number)||999); });
-    var lines = ["Number,Name,Goals,Assists,Plus/Minus"];
+    var lines = ["Number,Name,GamesPlayed,Goals,Assists,Points,Plus/Minus"];
     rows.forEach(function(r){
-      lines.push([r.number, r.name, r.g, r.a, r.pm].map(csvEscape).join(","));
+      lines.push([r.number, r.name, r.gp, r.g, r.a, r.pts, r.pm].map(csvEscape).join(","));
     });
     var goalieRows = computeGoalieStats(Object.keys(state.games).map(function(id){ return state.games[id]; }));
     if (goalieRows.length){
@@ -1384,11 +1510,11 @@
   function exportGameCsv(){
     var g = currentGame();
     if (!g){ showToast("Select a game first."); return; }
-    var rows = computeStats(g.events, statsRosterForCompute());
+    var rows = withGP(computeStats(g.events, statsRosterForCompute()), [g]);
     rows.sort(function(a,b){ return (parseInt(a.number)||999) - (parseInt(b.number)||999); });
-    var lines = ["Opponent,Date,Number,Name,Goals,Assists,Plus/Minus"];
+    var lines = ["Opponent,Date,Number,Name,Played,Goals,Assists,Points,Plus/Minus"];
     rows.forEach(function(r){
-      lines.push([g.meta.opponent, g.meta.date, r.number, r.name, r.g, r.a, r.pm].map(csvEscape).join(","));
+      lines.push([g.meta.opponent, g.meta.date, r.number, r.name, r.gp ? "Y" : "N", r.g, r.a, r.pts, r.pm].map(csvEscape).join(","));
     });
     if (g.meta.goalieId && rosterById(g.meta.goalieId)){
       var gs = computeGoalieStats([g])[0];
@@ -1524,7 +1650,7 @@
       if (!opponent){ showToast("Enter an opponent name."); return; }
       var taggedGoalies = activeRoster().filter(function(p){ return p.goalie; });
       var defaultGoalieId = taggedGoalies.length === 1 ? taggedGoalies[0].id : null;
-      var meta = { opponent: opponent, date: date, homeAway: pickerHomeAway, goalieId: defaultGoalieId };
+      var meta = { opponent: opponent, date: date, homeAway: pickerHomeAway, goalieId: defaultGoalieId, absent: [] };
       var id = makeGameId(meta);
       state.games[id] = { meta: meta, events: [] };
       state.currentGameId = id;
@@ -1546,11 +1672,15 @@
       renderStatsTab();
     });
 
+    document.getElementById("btnAttendance").addEventListener("click", function(){
+      attendanceOpen = !attendanceOpen;
+      renderAbsentStrip();
+    });
     document.getElementById("btnGoalFor").addEventListener("click", function(){
-      pendingType = "for"; pendingOnIce=[]; pendingScorer=null; pendingAssist=null; renderEntryPanel();
+      pendingType = "for"; pendingOnIce=[]; pendingScorer=null; pendingAssist=null; pendingSkipPM=false; renderEntryPanel();
     });
     document.getElementById("btnGoalAgainst").addEventListener("click", function(){
-      pendingType = "against"; pendingOnIce=[]; pendingScorer=null; pendingAssist=null; renderEntryPanel();
+      pendingType = "against"; pendingOnIce=[]; pendingScorer=null; pendingAssist=null; pendingSkipPM=false; renderEntryPanel();
     });
 
     document.getElementById("btnImportRoster").addEventListener("click", function(){
@@ -1570,7 +1700,7 @@
       th.addEventListener("click", function(){
         var key = th.getAttribute("data-sort");
         if (statsSortKey===key) statsSortDir = -statsSortDir;
-        else { statsSortKey = key; statsSortDir = -1; }
+        else { statsSortKey = key; statsSortDir = 1; } // first tap = highest first
         document.querySelectorAll("th.sortable").forEach(function(t){ t.classList.remove("active"); });
         th.classList.add("active");
         renderStatsTab();
